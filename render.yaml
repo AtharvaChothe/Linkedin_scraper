@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: linkedin-scraper
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.9
+      - key: PORT
+        value: 10000
+      - key: LINKEDIN_API_KEY
+        scope: secret
+      - key: DATABASE_HOST
+        scope: secret
+      - key: DATABASE_USER
+        scope: secret
+      - key: DATABASE_PASSWORD
+        scope: secret
+      - key: DATABASE_NAME
+        scope: secret
