@@ -15,7 +15,7 @@
       padding: 32px 16px;
     }
 
-    .container { max-width: 900px; margin: 0 auto; }
+    .container { max-width: 1200px; margin: 0 auto; }
 
     /* ── Header ── */
     header {
@@ -85,6 +85,9 @@
     .btn-primary:hover:not(:disabled)  { opacity: .88; }
     .btn-success  { background: #057642; color: #fff; }
     .btn-success:hover:not(:disabled)  { opacity: .88; }
+    .btn-copy     { background: #6c757d; color: #fff; font-size: 0.8rem; padding: 4px 10px; }
+    .btn-copy:hover:not(:disabled) { background: #5a6268; }
+    .btn-copy.copied { background: #28a745; }
     .btn-row { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
 
     /* ── Status bar ── */
@@ -116,19 +119,64 @@
       word-break: break-word;
     }
     tbody td a { color: #0a66c2; text-overflow: ellipsis; display: block; overflow: hidden; white-space: nowrap; }
-
-    /* ── Spinner ── */
-    .spinner {
-      display: inline-block;
-      width: 14px; height: 14px;
-      border: 2px solid rgba(255,255,255,.4);
-      border-top-color: #fff;
-      border-radius: 50%;
-      animation: spin .7s linear infinite;
-      vertical-align: middle;
-      margin-right: 6px;
+    
+    /* Copy button column */
+    td:last-child, th:last-child {
+      text-align: center;
+      width: 80px;
     }
-    @keyframes spin { to { transform: rotate(360deg); } }
+    .copy-btn {
+      background: #6c757d;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      padding: 5px 12px;
+      cursor: pointer;
+      font-size: 0.75rem;
+      transition: all 0.2s;
+    }
+    .copy-btn:hover {
+      background: #5a6268;
+      transform: scale(1.02);
+    }
+    .copy-btn.copied {
+      background: #28a745;
+    }
+
+    /* Toast notification */
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: #28a745;
+      color: white;
+      padding: 12px 20px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      z-index: 1000;
+      animation: slideIn 0.3s ease;
+    }
+    .toast.error {
+      background: #dc3545;
+    }
+    @keyframes slideIn {
+      from { transform: translateX(100%); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+
+    /* Selection hint */
+    .selection-hint {
+      position: fixed;
+      bottom: 20px;
+      left: 20px;
+      background: #0a66c2;
+      color: white;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      z-index: 1000;
+      animation: slideIn 0.3s ease;
+    }
   </style>
 </head>
 <body>
@@ -149,14 +197,12 @@
   <!-- Status -->
   <div id="status"></div>
 
-  
-
   <!-- Single URL -->
   <div class="card">
     <h2>🔍 Scrape a Single Profile</h2>
     <div class="input-row">
       <input id="singleUrl" type="url"
-        placeholder="https://www.linkedin.com/company/your-company or https://www.linkedin.com/in/your-profile" />
+        placeholder="https://www.linkedin.com/company/google or https://www.linkedin.com/in/username" />
       <button class="btn btn-primary" onclick="scrapeSingle()">Scrape</button>
     </div>
   </div>
@@ -165,7 +211,7 @@
   <div class="card">
     <h2>📋 Scrape Multiple Profiles</h2>
     <textarea id="bulkUrls"
-      placeholder="https://www.linkedin.com/company/your-company&#10;https://www.linkedin.com/in/your-profile&#10;https://www.linkedin.com/company/another-company"></textarea>
+      placeholder="https://www.linkedin.com/company/google&#10;https://www.linkedin.com/in/username&#10;https://www.linkedin.com/company/microsoft"></textarea>
     <p class="hint">One LinkedIn company or user URL per line.</p>
     <div class="btn-row">
       <button class="btn btn-primary" onclick="scrapeBulk()">Scrape All</button>
@@ -189,12 +235,13 @@
     <h2>✅ Results <span id="resultCount" style="color:#666;font-weight:400"></span></h2>
     <div class="btn-row" style="margin-bottom:16px">
       <button class="btn btn-success" onclick="downloadExcel()">⬇ Download Excel</button>
+      <button class="btn btn-primary" onclick="copyAllToClipboard()" style="background:#17a2b8">📋 Copy All</button>
       <button class="btn btn-primary" onclick="clearResults()" style="background:#e0e0e0;color:#333">Clear</button>
     </div>
     <div class="table-wrap">
       <table>
         <thead>
-          <tr id="tableHead"></tr>
+          <tr id="tableHead"><tr>
         </thead>
         <tbody id="tableBody"></tbody>
       </table>
@@ -224,12 +271,14 @@
     el.textContent = msg;
     el.className = type;
   }
+  
   function clearStatus() {
     const el = document.getElementById("status");
     el.className = "";
     el.textContent = "";
     el.style.display = "none";
   }
+  
   function setLoading(btn, loading) {
     if (loading) {
       btn.disabled = true;
@@ -240,8 +289,129 @@
       btn.innerHTML = btn._orig || btn.innerHTML;
     }
   }
+  
+  function showToast(message, isError = false) {
+    const toast = document.createElement('div');
+    toast.className = 'toast' + (isError ? ' error' : '');
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 2000);
+  }
 
-  /* ── Render table ── */
+  /* ── FALLBACK COPY METHODS (Fixes the clipboard error) ── */
+  function fallbackCopyText(text) {
+    // Method 1: Try using a temporary textarea
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.top = '-9999px';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.select();
+      textarea.setSelectionRange(0, text.length);
+      
+      const success = document.execCommand('copy');
+      document.body.removeChild(textarea);
+      
+      if (success) {
+        return true;
+      }
+    } catch (err) {
+      console.log('Fallback copy failed:', err);
+    }
+    
+    // Method 2: Show selection hint
+    showToast('⚠️ Press Ctrl+C to copy (text selected)', false);
+    return false;
+  }
+  
+  async function copyToClipboard(text, buttonElement) {
+    // Try modern clipboard API first
+    if (navigator.clipboard && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(text);
+        if (buttonElement) {
+          const originalText = buttonElement.textContent;
+          buttonElement.textContent = '✓ Copied!';
+          buttonElement.classList.add('copied');
+          setTimeout(() => {
+            buttonElement.textContent = originalText;
+            buttonElement.classList.remove('copied');
+          }, 1500);
+        }
+        showToast('Copied to clipboard!');
+        return true;
+      } catch (err) {
+        console.log('Clipboard API failed, using fallback:', err);
+      }
+    }
+    
+    // Fallback method
+    const success = fallbackCopyText(text);
+    if (success && buttonElement) {
+      const originalText = buttonElement.textContent;
+      buttonElement.textContent = '✓ Copied!';
+      buttonElement.classList.add('copied');
+      setTimeout(() => {
+        buttonElement.textContent = originalText;
+        buttonElement.classList.remove('copied');
+      }, 1500);
+      showToast('Copied to clipboard!');
+    } else if (!success) {
+      showToast('Press Ctrl+C to copy (text selected)', true);
+    }
+    return success;
+  }
+
+  function copyRowData(rowData, columns) {
+    let text = '';
+    for (let col of columns) {
+      const value = rowData[col] || 'N/A';
+      text += `${col}: ${value}\n`;
+    }
+    return text;
+  }
+
+  function getAllDataAsText() {
+    if (!scrapedData.length) return '';
+    
+    let columns = COLS;
+    if (scrapedData.length > 0 && scrapedData[0]["Full Name"]) {
+      columns = USER_COLS;
+    }
+    
+    let text = '';
+    // Add headers
+    text += columns.join('\t') + '\n';
+    text += '='.repeat(80) + '\n';
+    
+    // Add data
+    for (let row of scrapedData) {
+      for (let col of columns) {
+        const value = row[col] || 'N/A';
+        const cleanValue = String(value).replace(/\n/g, ' ').replace(/\t/g, ' ');
+        text += cleanValue + '\t';
+      }
+      text += '\n';
+      text += '-'.repeat(80) + '\n';
+    }
+    
+    return text;
+  }
+
+  async function copyAllToClipboard() {
+    if (!scrapedData.length) {
+      setStatus("No data to copy.", "error");
+      return;
+    }
+    
+    const text = getAllDataAsText();
+    await copyToClipboard(text);
+    showToast(`Copied ${scrapedData.length} rows to clipboard!`);
+  }
+
+  /* ── Render table with copy buttons ── */
   function renderTable(records, errors = []) {
     scrapedData = records;
 
@@ -251,12 +421,13 @@
       columns = USER_COLS;
     }
 
+    // Add "Copy" column to headers
     const head = document.getElementById("tableHead");
-    head.innerHTML = columns.map(c => `<th>${c}</th>`).join("");
+    head.innerHTML = columns.map(c => `<th>${c}</th>`).join("") + `<th>📋 Copy</th>`;
 
     const body = document.getElementById("tableBody");
-    body.innerHTML = records.map(r => `
-      <tr>${columns.map(c => {
+    body.innerHTML = records.map((r, idx) => {
+      const cells = columns.map(c => {
         const val = r[c] || "N/A";
         if (c === "LinkedIn URL" || c === "Website") {
           const href = val.startsWith("http") ? val : "https://" + val;
@@ -268,9 +439,16 @@
           return `<td><img src="${val}" alt="Profile" style="width:40px;height:40px;border-radius:50%;"></td>`;
         }
         const short = val.length > 180 ? val.slice(0, 180) + "…" : val;
-        return `<td title="${val.replace(/"/g,'&quot;')}">${short}</td>`;
-      }).join("")}</tr>
-    `).join("");
+        return `<td title="${String(val).replace(/"/g,'&quot;')}">${short}</td>`;
+      }).join("");
+      
+      // Add copy button for this row
+      const copyButton = `<td style="text-align:center">
+        <button class="copy-btn" onclick="copyThisRow(${idx})">📋 Copy</button>
+      </td>`;
+      
+      return `<tr>${cells}${copyButton}</tr>`;
+    }).join("");
 
     const dataType = records.length > 0 && records[0]["Full Name"] ? "user" : "company";
     const itemType = dataType === "user" ? "profile" : "company";
@@ -288,6 +466,28 @@
     }
 
     document.getElementById("results").style.display = "block";
+  }
+
+  /* ── Copy a single row ── */
+  async function copyThisRow(rowIndex) {
+    if (!scrapedData[rowIndex]) {
+      showToast('No data to copy', true);
+      return;
+    }
+    
+    let columns = COLS;
+    if (scrapedData.length > 0 && scrapedData[0]["Full Name"]) {
+      columns = USER_COLS;
+    }
+    
+    const rowData = scrapedData[rowIndex];
+    const text = copyRowData(rowData, columns);
+    
+    // Find the button that was clicked
+    const buttons = document.querySelectorAll('.copy-btn');
+    const button = buttons[rowIndex];
+    
+    await copyToClipboard(text, button);
   }
 
   /* ── Single scrape ── */
@@ -421,6 +621,26 @@
     document.getElementById("results").style.display = "none";
     clearStatus();
   }
+
+  // Add spinner style
+  const style = document.createElement('style');
+  style.textContent = `
+    .spinner {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(255,255,255,.4);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  `;
+  document.head.appendChild(style);
 </script>
 </body>
 </html>
