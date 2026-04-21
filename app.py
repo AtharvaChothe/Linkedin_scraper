@@ -10,76 +10,12 @@ import random
 import re
 from urllib.parse import urljoin, urlparse, quote_plus
 import json
-import os
-import datetime
-from dotenv import load_dotenv
-import mysql.connector
-
-db = mysql.connector.connect(
-    host=os.getenv("DB_HOST"),
-    user=os.getenv("DB_USER"),
-    password=os.getenv("DB_PASSWORD"),
-    database=os.getenv("DB_NAME")
-)
-
-cursor = db.cursor()
-# Create results directory if it doesn't exist
-RESULTS_DIR = os.path.join(os.path.dirname(__file__), 'results')
-os.makedirs(RESULTS_DIR, exist_ok=True)
-
-# Load environment variables
-load_dotenv()
+import logging
 
 app = Flask(__name__)
 CORS(app)
 
-# ─── LINKEDIN API CONFIG ──────────────────────────────────────────────────────
-LINKEDIN_API_KEY = os.getenv('LINKEDIN_API_KEY', '')  # Set your API key as environment variable
-LINKEDIN_API_BASE = 'https://api.linkedin.com/v2'
-
-def save_to_mysql(result):
-    try:
-        query = """
-        INSERT INTO linkedin_profiles (
-            linkedin_url, full_name, location, about,
-            current_company, education, connections, profile_picture
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-            full_name = VALUES(full_name),
-            location = VALUES(location),
-            about = VALUES(about),
-            current_company = VALUES(current_company),
-            education = VALUES(education),
-            connections = VALUES(connections),
-            profile_picture = VALUES(profile_picture)
-        """
-
-        values = (
-            result.get('LinkedIn URL'),
-            result.get('Full Name'),
-            result.get('Location'),
-            result.get('About'),
-            result.get('Current Company'),
-            result.get('Education'),
-            result.get('Connections'),
-            result.get('Profile Picture')
-        )
-
-        cursor.execute(query, values)
-        db.commit()
-
-        print("✅ Saved to MySQL:", result.get('Full Name'))
-
-    except Exception as e:
-        print("❌ DB Error:", e)
-
-def get_linkedin_api_headers():
-    """Headers for LinkedIn API requests"""
-    return {
-        'Authorization': f'Bearer {LINKEDIN_API_KEY}',
-        'X-Restli-Protocol-Version': '2.0.0',
-        'Content-Type': 'application/json',
-    }
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ─── HEADERS ──────────────────────────────────────────────────────────────────
 
@@ -125,202 +61,8 @@ def get_random_headers():
         "Connection": "keep-alive"
     }
 
-# ─── LINKEDIN API FUNCTIONS ───────────────────────────────────────────────────
-
-def extract_linkedin_id(url):
-    """Extract company or profile ID from LinkedIn URL"""
-    if '/company/' in url:
-        match = re.search(r'/company/([^/?#]+)', url)
-        return match.group(1) if match else None
-    elif '/in/' in url:
-        match = re.search(r'/in/([^/?#]+)', url)
-        return match.group(1) if match else None
-    return None
-
-def fetch_company_from_api(company_id):
-    """Fetch company data from LinkedIn API as fallback"""
-    if not LINKEDIN_API_KEY:
-        return {}
-
-    try:
-        # Get basic company info
-        url = f"{LINKEDIN_API_BASE}/organizations/{company_id}"
-        response = requests.get(url, headers=get_linkedin_api_headers(), timeout=10)
-
-        if response.status_code == 200:
-            data = response.json()
-            return {
-                "Company Name": data.get('localizedName', 'N/A'),
-                "Tagline": data.get('tagline', 'N/A'),
-                "Overview": data.get('localizedDescription', 'N/A'),
-                "Website": data.get('localizedWebsite', 'N/A'),
-                "Industry": data.get('industry', {}).get('localizedName', 'N/A') if data.get('industry') else 'N/A',
-                "Company Size": data.get('staffCountRange', {}).get('localizedName', 'N/A') if data.get('staffCountRange') else 'N/A',
-                "Headquarters": f"{data.get('headquarter', {}).get('geographicArea', {}).get('localizedName', 'N/A')}, {data.get('headquarter', {}).get('country', {}).get('localizedName', 'N/A')}" if data.get('headquarter') else 'N/A',
-                "Founded": str(data.get('foundedOn', {}).get('year', 'N/A')) if data.get('foundedOn') else 'N/A',
-                "Type": data.get('organizationType', 'N/A'),
-                "Specialties": ', '.join(data.get('specialties', [])) if data.get('specialties') else 'N/A'
-            }
-        else:
-            print(f"API Error: {response.status_code} - {response.text}")
-            return {}
-    except Exception as e:
-        print(f"API request failed: {e}")
-        return {}
-
-def fetch_profile_from_api(profile_id):
-    """Fetch specific profile data from LinkedIn API: position, connections, and education"""
-    if not LINKEDIN_API_KEY:
-        return {}
-
-    try:
-        data = {}
-
-        # Get basic profile info including connections
-        url = f"{LINKEDIN_API_BASE}/people/{profile_id}"
-        params = {
-            'projection': '(id,firstName,lastName,headline,publicProfileUrl,profilePicture,vanityName,connections)'
-        }
-        response = requests.get(url, headers=get_linkedin_api_headers(), params=params, timeout=10)
-
-        if response.status_code == 200:
-            profile_data = response.json()
-            data["Connections"] = profile_data.get('connections', 'N/A')
-
-        # Get current position
-        position_url = f"{LINKEDIN_API_BASE}/people/{profile_id}/positions"
-        params = {
-            'projection': '(elements*(id,title,company,startDate,endDate))',
-            'q': 'owned'
-        }
-        response = requests.get(position_url, headers=get_linkedin_api_headers(), params=params, timeout=10)
-
-        if response.status_code == 200:
-            positions_data = response.json()
-            elements = positions_data.get('elements', [])
-            if elements:
-                # Get the most recent position (current position)
-                current_position = elements[0]  # API returns in reverse chronological order
-                title = current_position.get('title', 'N/A')
-                company_name = current_position.get('company', {}).get('name', 'N/A') if current_position.get('company') else 'N/A'
-                if title != 'N/A' and company_name != 'N/A':
-                    data["Current Company"] = f"{title} at {company_name}"
-                elif title != 'N/A':
-                    data["Current Company"] = title
-                elif company_name != 'N/A':
-                    data["Current Company"] = company_name
-
-        # Get education
-        education_url = f"{LINKEDIN_API_BASE}/people/{profile_id}/educations"
-        params = {
-            'projection': '(elements*(id,schoolName,degreeName,fieldOfStudy,startDate,endDate))',
-            'q': 'owned'
-        }
-        response = requests.get(education_url, headers=get_linkedin_api_headers(), params=params, timeout=10)
-
-        if response.status_code == 200:
-            education_data = response.json()
-            elements = education_data.get('elements', [])
-            if elements:
-                # Format education data
-                education_list = []
-                for edu in elements[:3]:  # Limit to 3 most recent
-                    school = edu.get('schoolName', 'N/A')
-                    degree = edu.get('degreeName', 'N/A')
-                    field = edu.get('fieldOfStudy', 'N/A')
-                    start_year = edu.get('startDate', {}).get('year', '') if edu.get('startDate') else ''
-                    end_year = edu.get('endDate', {}).get('year', '') if edu.get('endDate') else ''
-
-                    edu_str = school
-                    if degree and degree != 'N/A':
-                        edu_str += f", {degree}"
-                    if field and field != 'N/A':
-                        edu_str += f" in {field}"
-                    if start_year or end_year:
-                        years = f"{start_year}-{end_year}" if start_year and end_year else (start_year or end_year)
-                        edu_str += f" ({years})"
-
-                    education_list.append(edu_str)
-
-                data["Education"] = " | ".join(education_list) if education_list else 'N/A'
-            else:
-                data["Education"] = 'N/A'
-        else:
-            data["Education"] = 'N/A'
-
-        return data
-
-    except Exception as e:
-        print(f"API request failed: {e}")
-        return {}
-
-def merge_api_fallback(scraped_data, api_data):
-    """Merge scraped data with API fallback for missing fields"""
-    merged = scraped_data.copy()
-
-    # Only use API data for fields that are "N/A" in scraped data
-    for key, value in api_data.items():
-        if key in merged and (merged[key] == "N/A" or not merged[key]) and value != "N/A":
-            merged[key] = value
-            print(f"   API fallback used for: {key}")
-
-    return merged
-
 def human_delay(min_s=1.5, max_s=10):
     time.sleep(random.uniform(min_s, max_s))
-
-
-def save_results_to_file(results, operation_type, url=None):
-    """Save scraping results to a JSON file and return the file path"""
-    try:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        if url:
-            # Extract identifier from URL for filename
-            if '/in/' in url:
-                identifier = url.split('/in/')[-1].split('/')[0].split('?')[0]
-                filename = f"profile_{identifier}_{timestamp}.json"
-            elif '/company/' in url:
-                identifier = url.split('/company/')[-1].split('/')[0].split('?')[0]
-                filename = f"company_{identifier}_{timestamp}.json"
-            else:
-                filename = f"{operation_type}_{timestamp}.json"
-        else:
-            filename = f"{operation_type}_{timestamp}.json"
-
-        filepath = os.path.join(RESULTS_DIR, filename)
-
-        # Save results to file
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
-
-        return filepath
-
-    except Exception as e:
-        print(f"Error saving results to file: {e}")
-        return None
-
-
-def cleanup_old_files(max_age_days=7):
-    """Remove result files older than max_age_days"""
-    try:
-        cutoff_time = datetime.datetime.now() - datetime.timedelta(days=max_age_days)
-        deleted_count = 0
-
-        for filename in os.listdir(RESULTS_DIR):
-            if filename.endswith('.json'):
-                filepath = os.path.join(RESULTS_DIR, filename)
-                file_time = datetime.datetime.fromtimestamp(os.path.getmtime(filepath))
-
-                if file_time < cutoff_time:
-                    os.remove(filepath)
-                    deleted_count += 1
-
-        return deleted_count
-
-    except Exception as e:
-        print(f"Error during cleanup: {e}")
-        return 0
 
 
 def normalize_linkedin_url(url):
@@ -334,6 +76,157 @@ def normalize_linkedin_url(url):
         raise ValueError("Invalid URL")
     clean_path = re.sub(r'(?<!:)//+', '/', parsed.path)
     return f"{parsed.scheme}://{parsed.netloc}{clean_path}".rstrip('/')
+
+
+def convert_count_suffix(count_str):
+    """Convert K/M/B suffixes to full numbers"""
+    if not count_str:
+        return count_str
+    
+    original = count_str
+    count_str = count_str.upper().strip()
+    multiplier = 1
+    
+    if count_str.endswith('K'):
+        multiplier = 1000
+        count_str = count_str[:-1]
+    elif count_str.endswith('M'):
+        multiplier = 1000000
+        count_str = count_str[:-1]
+    elif count_str.endswith('B'):
+        multiplier = 1000000000
+        count_str = count_str[:-1]
+    
+    try:
+        # Handle decimal numbers like 1.5K
+        if '.' in count_str:
+            num = float(count_str)
+        else:
+            num = int(count_str.replace(',', ''))
+        
+        total = int(num * multiplier)
+        return f"{total:,}"
+    except:
+        return original
+
+
+# ─── EMPLOYEE COUNT EXTRACTOR (IMPROVED) ─────────────────────────────────────────────────
+
+def extract_employee_count(soup_main, soup_about, raw_html_main, raw_html_about):
+    """
+    Extracts employee count with multiple strategies.
+    Returns a string like '10,001+ employees' or 'N/A'
+    """
+    
+    # Strategy 1: Look for "X associated members" (most accurate for LinkedIn)
+    for html in [raw_html_about, raw_html_main]:
+        # Pattern for "X associated members"
+        patterns = [
+            r'([\d,]+(?:\.\d+)?[KkMmBb]?\+?)\s+associated\s+members?',
+            r'([\d,]+(?:\.\d+)?[KkMmBb]?\+?)\s+members?',
+            r'([\d,]+(?:\.\d+)?[KkMmBb]?\+?)\s+employees?',
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, html, re.IGNORECASE)
+            if m:
+                count = m.group(1).strip()
+                # Convert K/M/B suffixes
+                count = convert_count_suffix(count)
+                # Get the full match for context
+                full_match = m.group(0).strip()
+                return full_match
+    
+    # Strategy 2: dt/dd pairs with size/employee label
+    for soup_target in [soup_about, soup_main]:
+        for dt in soup_target.find_all('dt'):
+            label = dt.get_text(strip=True).lower()
+            if 'size' in label or 'employee' in label or 'headcount' in label:
+                dd = dt.find_next_sibling('dd')
+                if dd:
+                    val = dd.get_text(strip=True)
+                    if val and any(c.isdigit() for c in val):
+                        return val.strip()
+    
+    # Strategy 3: Regex on full page text for employee ranges
+    for html in [raw_html_about, raw_html_main]:
+        soup_tmp = BeautifulSoup(html, 'html.parser')
+        full_text = soup_tmp.get_text(separator=' ', strip=True)
+        
+        # Look for patterns like "10,001+ employees" or "51-200 employees"
+        patterns = [
+            r'(\d{1,3}(?:,\d{3})*\+?\s*(?:-|to)?\s*\d{0,3}(?:,\d{3})*\+?)\s*employees?',
+            r'employees?\s*:\s*(\d{1,3}(?:,\d{3})*\+?)',
+            r'staff\s*:\s*(\d{1,3}(?:,\d{3})*\+?)',
+            r'headcount\s*:\s*(\d{1,3}(?:,\d{3})*\+?)',
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, full_text, re.IGNORECASE)
+            if m:
+                return m.group(0).strip()
+    
+    # Strategy 4: JSON blobs in the page
+    for html in [raw_html_about, raw_html_main]:
+        json_patterns = [
+            r'"staffCount"\s*:\s*"([^"]+)"',
+            r'"staffCount"\s*:\s*(\d+)',
+            r'"employeeCount"\s*:\s*"([^"]+)"',
+            r'"employeeCount"\s*:\s*(\d+)',
+            r'"numEmployees"\s*:\s*"([^"]+)"',
+            r'"numEmployees"\s*:\s*(\d+)',
+            r'"headcount"\s*:\s*"([^"]+)"',
+            r'"headcount"\s*:\s*(\d+)',
+            r'"size"\s*:\s*"([^"]+)"',
+        ]
+        for pattern in json_patterns:
+            m = re.search(pattern, html, re.IGNORECASE)
+            if m:
+                count = m.group(1).strip()
+                if count.isdigit():
+                    return f"{int(count):,} employees"
+                return f"{count} employees"
+    
+    # Strategy 5: JSON-LD numberOfEmployees
+    for soup_target in [soup_about, soup_main]:
+        for script in soup_target.find_all('script', type='application/ld+json'):
+            try:
+                ld = json.loads(script.string or "")
+                if isinstance(ld, list):
+                    for item in ld:
+                        if item.get('@type') == 'Organization':
+                            count = item.get('numberOfEmployees')
+                            if count:
+                                if isinstance(count, dict):
+                                    val = count.get('value')
+                                    if val:
+                                        return f"{int(val):,} employees"
+                                elif isinstance(count, (int, float)):
+                                    return f"{int(count):,} employees"
+                                elif isinstance(count, str) and count.isdigit():
+                                    return f"{int(count):,} employees"
+            except Exception:
+                pass
+    
+    # Strategy 6: Look for LinkedIn size range strings
+    for html in [raw_html_about, raw_html_main]:
+        # Standard LinkedIn size categories
+        size_patterns = [
+            r'(Self-employed|1-10|11-50|51-200|201-500|501-1,000|1,001-5,000|5,001-10,000|10,001\+)\s*employees?',
+            r'(\d+[+-]\d+|\d+\+|\d+-\d+)\s*employees?',
+        ]
+        for pattern in size_patterns:
+            m = re.search(pattern, html, re.IGNORECASE)
+            if m:
+                return m.group(0).strip()
+    
+    # Strategy 7: Extract from meta tags
+    for soup_target in [soup_about, soup_main]:
+        meta_desc = soup_target.find('meta', {'name': 'description'})
+        if meta_desc and meta_desc.get('content'):
+            m = re.search(r'(\d{1,3}(?:,\d{3})*\+?)\s*employees?', meta_desc['content'], re.IGNORECASE)
+            if m:
+                return m.group(0).strip()
+    
+    return "N/A"
 
 
 # ─── GOOGLE DORK: find employee LinkedIn URLs without login ───────────────────
@@ -538,111 +431,6 @@ def format_employees_for_display(employees):
     return "\n\n".join(lines)
 
 
-# ─── EMPLOYEE COUNT EXTRACTOR ─────────────────────────────────────────────────
-
-def extract_employee_count(soup_main, soup_about, raw_html_main, raw_html_about):
-    """
-    Tries multiple strategies to extract the employee count (e.g. '10,001+ employees').
-    Returns a string like '10,001+ employees' or 'N/A'.
-    """
-
-    # Strategy 0 (HIGHEST PRIORITY): "139,416 associated members" sentence
-    # LinkedIn shows this on the about/main page as the real headcount
-    for html in [raw_html_about, raw_html_main]:
-        # Match: "139,416 associated members" with optional description after
-        m = re.search(
-            r'([\d,]+)\s+associated members?(?:[^\n<]{0,120})?',
-            html, re.IGNORECASE
-        )
-        if m:
-            # Return the full matched sentence, capped at a readable length
-            full_match = m.group(0).strip()
-            # Clean HTML entities / tags if any leaked through
-            full_match = re.sub(r'<[^>]+>', '', full_match).strip()
-            full_match = full_match.replace('&amp;', '&').replace('&#39;', "'")
-            if len(full_match) > 120:
-                full_match = full_match[:120].rsplit(' ', 1)[0] + '…'
-            return full_match
-
-        # Also try on plain text of the page
-        soup_tmp  = BeautifulSoup(html, 'html.parser')
-        full_text = soup_tmp.get_text(separator=' ', strip=True)
-        m = re.search(
-            r'([\d,]+)\s+associated members?(?:[^\n]{0,120})?',
-            full_text, re.IGNORECASE
-        )
-        if m:
-            full_match = m.group(0).strip()
-            if len(full_match) > 120:
-                full_match = full_match[:120].rsplit(' ', 1)[0] + '…'
-            return full_match
-
-    # Strategy 1: dt/dd pairs with 'size' label on both pages
-    for soup_target in [soup_about, soup_main]:
-        for dt in soup_target.find_all('dt'):
-            label = dt.get_text(strip=True).lower()
-            if 'size' in label or 'employee' in label:
-                dd = dt.find_next_sibling('dd')
-                if dd:
-                    val = dd.get_text(strip=True)
-                    if val:
-                        return val
-
-    # Strategy 2: regex on full page text
-    for html in [raw_html_about, raw_html_main]:
-        soup_tmp = BeautifulSoup(html, 'html.parser')
-        full_text = soup_tmp.get_text(separator=' ', strip=True)
-        match = re.search(
-            r'([\d,]+\+?\s*(?:to|-)\s*[\d,]+\+?|[\d,]+\+?)\s*employees?',
-            full_text, re.IGNORECASE
-        )
-        if match:
-            return match.group(0).strip()
-
-    # Strategy 3: JSON blobs in the page
-    for html in [raw_html_about, raw_html_main]:
-        patterns = [
-            r'"staffCount"\s*:\s*(\d+)',
-            r'"employeeCount"\s*:\s*(\d+)',
-            r'"numEmployees"\s*:\s*(\d+)',
-            r'"headcount"\s*:\s*(\d+)',
-        ]
-        for pat in patterns:
-            m = re.search(pat, html)
-            if m:
-                return f"{int(m.group(1)):,} employees"
-
-    # Strategy 4: JSON-LD numberOfEmployees
-    for soup_target in [soup_about, soup_main]:
-        for script in soup_target.find_all('script', type='application/ld+json'):
-            try:
-                ld = json.loads(script.string or "")
-                if isinstance(ld, list):
-                    ld = ld[0]
-                if ld.get('@type') == 'Organization':
-                    count = ld.get('numberOfEmployees', None)
-                    if isinstance(count, dict):
-                        val = count.get('value')
-                        if val:
-                            return f"{int(val):,} employees"
-                    elif count:
-                        return f"{int(count):,} employees"
-            except Exception:
-                pass
-
-    # Strategy 5: look for common LinkedIn size range strings in raw text
-    for html in [raw_html_about, raw_html_main]:
-        for pattern in [
-            r'(\d{1,3}(?:,\d{3})*\+?\s*(?:-|to)\s*\d{1,3}(?:,\d{3})*\+?)\s*employees?',
-            r'((?:Self-employed|1-10|11-50|51-200|201-500|501-1,000|1,001-5,000|5,001-10,000|10,001\+))\s*employees?',
-        ]:
-            m = re.search(pattern, html, re.IGNORECASE)
-            if m:
-                return m.group(0).strip()
-
-    return "N/A"
-
-
 # ─── COMPANY SCRAPER ──────────────────────────────────────────────────────────
 
 def scrape_company(url):
@@ -775,13 +563,31 @@ def scrape_company(url):
             except Exception:
                 pass
 
-        # ── EMPLOYEE COUNT (dedicated extraction) ────────────────────────────
+        # ── EMPLOYEE COUNT (IMPROVED EXTRACTION) ────────────────────────────
         employee_count = extract_employee_count(soup, soup_about, raw_html_main, raw_html_about)
-        data["Employee Count"] = employee_count
-
-        # If Company Size already has a value from dt/dd, prefer it
-        if data.get("Company Size") and data["Company Size"] != "N/A":
+        
+        # Use employee count if found, otherwise fall back to company size
+        if employee_count != "N/A":
+            data["Employee Count"] = employee_count
+        elif data.get("Company Size") and data["Company Size"] != "N/A":
             data["Employee Count"] = data["Company Size"]
+        else:
+            data["Employee Count"] = "N/A"
+        
+        # Also try to extract from the main page raw HTML if not found
+        if data["Employee Count"] == "N/A":
+            # Look for "X employees" pattern in main page
+            main_match = re.search(r'(\d{1,3}(?:,\d{3})*\+?)\s*employees?', raw_html_main, re.IGNORECASE)
+            if main_match:
+                data["Employee Count"] = main_match.group(0).strip()
+        
+        # Additional check for company size from about page
+        if data["Employee Count"] == "N/A" and data.get("Company Size") == "N/A":
+            # Look for size in about page text
+            about_text = soup_about.get_text()
+            size_match = re.search(r'(?:Company size|Size)[:\s]+(\d[\d,+\-]+)', about_text, re.IGNORECASE)
+            if size_match:
+                data["Employee Count"] = size_match.group(1).strip()
 
         # ── EMPLOYEES (profile links) ────────────────────────────────────────
         company_name = data.get("Company Name", "")
@@ -800,19 +606,11 @@ def scrape_company(url):
         ]:
             data.setdefault(key, "N/A")
 
-        # ── API FALLBACK for missing data ────────────────────────────────────
-        missing_fields = [k for k, v in data.items() if v == "N/A"]
-        if missing_fields and LINKEDIN_API_KEY:
-            print(f"   Missing fields: {missing_fields} - trying API fallback")
-            company_id = extract_linkedin_id(url)
-            if company_id:
-                api_data = fetch_company_from_api(company_id)
-                if api_data:
-                    data = merge_api_fallback(data, api_data)
-
     except requests.RequestException as e:
+        logging.error(f"Network error scraping company {url}: {str(e)}")
         raise Exception(f"Network error: {str(e)}")
     except Exception as e:
+        logging.error(f"Scraping failed for company {url}: {str(e)}")
         raise Exception(f"Scraping failed: {str(e)}")
 
     human_delay()
@@ -838,8 +636,8 @@ def scrape_user(url):
     })
 
     data = {
-        "LinkedIn URL": url, "Full Name": "N/A",
-        "Location": "N/A", "About": "N/A",
+        "LinkedIn URL": url, "Full Name": "N/A", "Headline": "N/A",
+        "Location": "N/A", "About": "N/A", "Current Position": "N/A",
         "Current Company": "N/A", "Education": "N/A",
         "Connections": "N/A", "Profile Picture": "N/A",
     }
@@ -863,7 +661,7 @@ def scrape_user(url):
             if " - " in content:
                 parts = content.split(" - ", 1)
                 data["Full Name"] = parts[0].strip()
-                data["Current Company"]  = parts[1].strip()
+                data["Headline"]  = parts[1].strip()
             else:
                 data["Full Name"] = content
 
@@ -887,71 +685,23 @@ def scrape_user(url):
                 if " - " in title_text:
                     parts = title_text.split(" - ", 1)
                     data["Full Name"] = parts[0].strip()
-                    if data["Current Company"] == "N/A":
-                        data["Current Company"] = parts[1].strip()
+                    if data["Headline"] == "N/A":
+                        data["Headline"] = parts[1].strip()
                 elif title_text:
                     data["Full Name"] = title_text.strip()
-
-        if data["Full Name"] == "N/A":
-            for sel in [
-                'h1.text-heading-xlarge',
-                '.pv-top-card--list li.inline.t-24.t-black.t-normal.break-words',
-                '.text-heading-xlarge.inline.t-24.t-black.t-normal.break-words',
-                '.pv-top-card h1',
-            ]:
-                el = soup.select_one(sel)
-                if el and el.get_text(strip=True):
-                    data["Full Name"] = el.get_text(strip=True)
-                    break
-
-        if data["Current Company"] == "N/A":
-            for sel in [
-                '.text-body-medium.break-words',
-                '.pv-top-card--list-bullet li',
-                '.pv-text-details__left-panel h2',
-                '.pv-top-card--experience-list',
-            ]:
-                el = soup.select_one(sel)
-                if el and el.get_text(strip=True):
-                    data["Current Company"] = el.get_text(strip=True)
-                    break
-
-        if data["Location"] == "N/A":
-            for sel in [
-                '.text-body-small.inline.t-black--light.break-words',
-                '.pv-top-card--list-bullet li',
-                '.pv-text-details__left-panel .text-body-small.inline',
-                '.top-card-layout__first-subline',
-            ]:
-                el = soup.select_one(sel)
-                if el and el.get_text(strip=True):
-                    data["Location"] = el.get_text(strip=True)
-                    break
-
-        if data["About"] == "N/A":
-            for sel in [
-                '#about .pv-shared-text-with-see-more__text',
-                '#about .inline-show-more-text span',
-                '.pv-about-section .lt-line-clamp__raw-line',
-                '.artdeco-card__contents p',
-            ]:
-                el = soup.select_one(sel)
-                if el and el.get_text(strip=True):
-                    raw = el.get_text(separator=' ', strip=True)
-                    data["About"] = raw[:500] + ("..." if len(raw) > 500 else "")
-                    break
-
-        if data["Profile Picture"] == "N/A":
-            img = soup.select_one('img.pv-top-card-profile-picture__image, img.profile-photo-edit__preview, img.presence-entity__image')
-            if img and img.get("src"):
-                data["Profile Picture"] = img.get("src").strip()
 
         json_patterns = {
             "Full Name":        [r'"firstName"\s*:\s*"([^"]{2,60})".*?"lastName"\s*:\s*"([^"]{2,60})"',
                                  r'"name"\s*:\s*"([A-Z][a-zA-Z\s]{2,60})"'],
+            "Headline":         [r'"headline"\s*:\s*"([^"]{3,200})"'],
             "Location":         [r'"locationName"\s*:\s*"([^"]{2,100})"',
                                  r'"geoLocationName"\s*:\s*"([^"]{2,100})"'],
             "About":            [r'"summary"\s*:\s*"([^"]{20,2000})"'],
+            "Current Position": [
+                r'"currentPosition"\s*:\s*\{[^}]*?"title"\s*:\s*"([^\"]{3,200})"',
+                r'"title"\s*:\s*"([^\"]{3,200})"',
+                r'"jobTitle"\s*:\s*"([^\"]{3,200})"',
+            ],
             "Current Company":  [
                 r'"currentCompany"\s*:\s*\{[^}]*?"name"\s*:\s*"([^\"]{2,100})"',
                 r'"companyName"\s*:\s*"([^\"]{2,100})"',
@@ -984,17 +734,11 @@ def scrape_user(url):
                 if ld.get("@type") != "Person":
                     continue
                 if data["Full Name"]       == "N/A": data["Full Name"]       = ld.get("name", "N/A")
+                if data["Headline"]        == "N/A": data["Headline"]        = ld.get("jobTitle", "N/A")
                 if data["Current Company"] == "N/A":
-                    position = ld.get("jobTitle", "")
                     org = ld.get("worksFor", [{}])
                     if isinstance(org, list): org = org[0] if org else {}
-                    company = org.get("name", "")
-                    if position and company:
-                        data["Current Company"] = f"{position} at {company}"
-                    elif position:
-                        data["Current Company"] = position
-                    elif company:
-                        data["Current Company"] = company
+                    data["Current Company"] = org.get("name", "N/A")
                 if data["Location"] == "N/A":
                     addr = ld.get("address", {})
                     data["Location"] = addr.get("addressLocality", "N/A") if isinstance(addr, dict) else "N/A"
@@ -1005,31 +749,11 @@ def scrape_user(url):
         found = sum(1 for v in data.values() if v not in ("N/A", url))
         print(f"   {found}/{len(data)-1} fields extracted")
 
-        # ── API CALLS for specific fields: Connections, Education ──
-        if LINKEDIN_API_KEY:
-            print("   Fetching Connections and Education from API")
-            profile_id = extract_linkedin_id(url)
-            if profile_id:
-                api_data = fetch_profile_from_api(profile_id)
-                if api_data:
-                    # Prioritize API data for these specific fields
-                    for field in ["Current Company", "Connections", "Education"]:
-                        if field in api_data and api_data[field] != "N/A":
-                            data[field] = api_data[field]
-                            print(f"   API data used for: {field}")
-
-        # ── API FALLBACK for other missing data ──────────────────────────────
-        missing_fields = [k for k, v in data.items() if v == "N/A"]
-        if missing_fields and LINKEDIN_API_KEY:
-            print(f"   Missing fields: {missing_fields} - trying API fallback")
-            profile_id = extract_linkedin_id(url)
-            if profile_id:
-                # For other fields, we could add more API calls here if needed
-                pass
-
     except requests.RequestException as e:
+        logging.error(f"Network error scraping user {url}: {e}")
         raise Exception(f"Network error: {e}")
     except Exception as e:
+        logging.error(f"Scraping error for user {url}: {e}")
         raise Exception(f"Scraping error: {e}")
 
     human_delay()
@@ -1051,8 +775,8 @@ def generate_excel_bytes(data_list):
         ]
     elif data_list and "Full Name" in data_list[0]:
         headers = [
-            "Full Name", "Location", "About",
-            "Current Company", "Education",
+            "Full Name", "Headline", "Location", "About",
+            "Current Position", "Current Company", "Education",
             "Connections", "Profile Picture", "LinkedIn URL",
         ]
     else:
@@ -1097,409 +821,138 @@ def index():
 
 @app.route("/scrape-profile", methods=["POST"])
 def scrape_profile():
-    """Scrape a single LinkedIn profile or company"""
+    body      = request.get_json(silent=True) or {}
+    input_url = (body.get("url") or "").strip()
+    if not input_url:
+        return jsonify({"error": "URL required"}), 400
     try:
-        body = request.get_json(silent=True) or {}
-        input_url = (body.get("url") or "").strip()
+        url = normalize_linkedin_url(input_url)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
-        if not input_url:
-            return jsonify({"error": "URL is required", "code": "MISSING_URL"}), 400
+    lower      = url.lower()
+    is_company = bool(re.search(r"linkedin\.com/(company|school|showcase)/", lower))
+    is_user    = bool(re.search(r"linkedin\.com/(in|pub)/", lower))
+    if not (is_company or is_user):
+        return jsonify({"error": "Provide a LinkedIn /company/ or /in/ URL"}), 400
 
-        try:
-            url = normalize_linkedin_url(input_url)
-        except ValueError as e:
-            return jsonify({"error": str(e), "code": "INVALID_URL"}), 400
-
-        lower = url.lower()
-        is_company = bool(re.search(r"linkedin\.com/(company|school|showcase)/", lower))
-        is_user = bool(re.search(r"linkedin\.com/(in|pub)/", lower))
-
-        if not (is_company or is_user):
-            return jsonify({
-                "error": "URL must be a LinkedIn company (/company/) or profile (/in/) URL",
-                "code": "INVALID_LINKEDIN_URL"
-            }), 400
-
+    try:
         result = scrape_company(url) if is_company else scrape_user(url)
-
-        # Save results to file
-        # 🔥 ADD THIS
-        if not is_company:
-            save_to_mysql(result)
-        saved_file = save_results_to_file([result], "single_profile", url)
-
-        response_data = {
-            "results": [result],
-            "saved_to_file": saved_file is not None,
-            "file_path": saved_file
-        }
-
-        return jsonify(response_data)
-
+        return jsonify([result])
     except Exception as e:
-        return jsonify({"error": f"Scraping failed: {str(e)}", "code": "SCRAPING_ERROR"}), 500
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/scrape-bulk", methods=["POST"])
 def scrape_bulk():
-    """Scrape multiple LinkedIn profiles or companies"""
-    try:
-        body = request.get_json(silent=True) or {}
-        urls = body.get("urls")
+    body = request.get_json(silent=True) or {}
+    urls = body.get("urls")
+    if not isinstance(urls, list) or not urls:
+        return jsonify({"error": "A list of URLs is required"}), 400
 
-        if not isinstance(urls, list) or not urls:
-            return jsonify({
-                "error": "A non-empty list of URLs is required",
-                "code": "INVALID_URLS_LIST"
-            }), 400
+    results, errors = [], []
+    for raw_url in urls:
+        try:
+            if not raw_url or not str(raw_url).strip():
+                raise ValueError("Empty URL")
+            clean_url  = normalize_linkedin_url(str(raw_url))
+            lower_url  = clean_url.lower()
+            is_company = bool(re.search(r"linkedin\.com/(company|school|showcase)/", lower_url))
+            is_user    = bool(re.search(r"linkedin\.com/(in|pub)/", lower_url))
+            if not (is_company or is_user):
+                errors.append({"url": raw_url, "error": "Must be /company/ or /in/ URL"})
+                continue
+            results.append(scrape_company(clean_url) if is_company else scrape_user(clean_url))
+        except Exception as e:
+            errors.append({"url": raw_url, "error": str(e)})
 
-        if len(urls) > 50:  # Limit bulk requests
-            return jsonify({
-                "error": "Maximum 50 URLs allowed per request",
-                "code": "TOO_MANY_URLS"
-            }), 400
-
-        results, errors = [], []
-
-        for raw_url in urls:
-            try:
-                if not raw_url or not str(raw_url).strip():
-                    raise ValueError("Empty URL provided")
-
-                clean_url = normalize_linkedin_url(str(raw_url))
-                lower_url = clean_url.lower()
-                is_company = bool(re.search(r"linkedin\.com/(company|school|showcase)/", lower_url))
-                is_user = bool(re.search(r"linkedin\.com/(in|pub)/", lower_url))
-
-                if not (is_company or is_user):
-                    errors.append({
-                        "url": raw_url,
-                        "error": "Must be a LinkedIn /company/ or /in/ URL",
-                        "code": "INVALID_LINKEDIN_URL"
-                    })
-                    continue
-
-                result = scrape_company(clean_url) if is_company else scrape_user(clean_url)
-                results.append(result)
-
-            except Exception as e:
-                errors.append({
-                    "url": raw_url,
-                    "error": str(e),
-                    "code": "SCRAPING_ERROR"
-                })
-
-        # Save results to file if we have any successful results
-        saved_file = None
-        if results:
-            saved_file = save_results_to_file(results, "bulk_scraping")
-
-        response_data = {
-            "results": results,
-            "errors": errors,
-            "saved_to_file": saved_file is not None,
-            "file_path": saved_file,
-            "total_processed": len(results) + len(errors),
-            "successful": len(results),
-            "failed": len(errors)
-        }
-
-        return jsonify(response_data)
-
-    except Exception as e:
-        return jsonify({"error": f"Request processing failed: {str(e)}", "code": "REQUEST_ERROR"}), 500
+    return jsonify({"results": results, "errors": errors})
 
 
 @app.route("/download-excel", methods=["POST"])
 def download_excel():
-    """Export scraped data to Excel format"""
-    try:
-        data = request.get_json(silent=True)
+    data = request.get_json(silent=True)
+    if isinstance(data, dict):
+        data_list = data.get("results", [])
+    elif isinstance(data, list):
+        data_list = data
+    else:
+        return jsonify({"error": "Invalid data format"}), 400
 
-        if isinstance(data, dict):
-            data_list = data.get("results", [])
-        elif isinstance(data, list):
-            data_list = data
-        else:
-            return jsonify({
-                "error": "Request body must be a JSON object with 'results' array or a JSON array",
-                "code": "INVALID_DATA_FORMAT"
-            }), 400
+    if not data_list:
+        return jsonify({"error": "No data to export"}), 400
 
-        if not data_list:
-            return jsonify({
-                "error": "No data to export",
-                "code": "NO_DATA"
-            }), 400
-
-        bio = generate_excel_bytes(data_list)
-        return send_file(
-            bio,
-            as_attachment=True,
-            download_name="linkedin_data.xlsx",
-            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-    except Exception as e:
-        return jsonify({"error": f"Excel generation failed: {str(e)}", "code": "EXCEL_ERROR"}), 500
+    bio = generate_excel_bytes(data_list)
+    return send_file(
+        bio,
+        as_attachment=True,
+        download_name="linkedin_data.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 @app.route("/upload-urls", methods=["POST"])
 def upload_urls():
-    """Upload a file containing URLs to scrape"""
-    try:
-        if 'file' not in request.files:
-            return jsonify({
-                "error": "No file part in the request",
-                "code": "NO_FILE"
-            }), 400
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+    if file:
+        try:
+            filename = file.filename.lower()
+            if filename.endswith('.xlsx') or filename.endswith('.xls'):
+                # Handle Excel file
+                wb = openpyxl.load_workbook(file)
+                ws = wb.active
+                urls = []
+                for row in ws.iter_rows(min_row=2, max_col=1, values_only=True):  # Start from row 2, first column
+                    url = row[0]
+                    if url and str(url).strip():
+                        urls.append(str(url).strip())
+            else:
+                # Handle text/CSV file
+                content = file.read().decode('utf-8')
+                urls = [line.strip() for line in content.splitlines() if line.strip()]
+            if not urls:
+                return jsonify({"error": "No URLs found in file"}), 400
+        except Exception as e:
+            return jsonify({"error": f"Error reading file: {str(e)}"}), 400
 
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({
-                "error": "No file selected",
-                "code": "EMPTY_FILENAME"
-            }), 400
+    results, errors = [], []
+    for raw_url in urls:
+        try:
+            if not raw_url or not str(raw_url).strip():
+                raise ValueError("Empty URL")
+            clean_url  = normalize_linkedin_url(str(raw_url))
+            lower_url  = clean_url.lower()
+            is_company = bool(re.search(r"linkedin\.com/(company|school|showcase)/", lower_url))
+            is_user    = bool(re.search(r"linkedin\.com/(in|pub)/", lower_url))
+            if not (is_company or is_user):
+                errors.append({"url": raw_url, "error": "Must be /company/ or /in/ URL"})
+                continue
+            results.append(scrape_company(clean_url) if is_company else scrape_user(clean_url))
+        except Exception as e:
+            errors.append({"url": raw_url, "error": str(e)})
 
-        if file:
-            try:
-                filename = file.filename.lower()
-                if filename.endswith(('.xlsx', '.xls')):
-                    # Handle Excel file
-                    wb = openpyxl.load_workbook(file)
-                    ws = wb.active
-                    urls = []
-                    for row in ws.iter_rows(min_row=2, max_col=1, values_only=True):  # Start from row 2, first column
-                        url = row[0]
-                        if url and str(url).strip():
-                            urls.append(str(url).strip())
-                elif filename.endswith(('.txt', '.csv')):
-                    # Handle text/CSV file
-                    content = file.read().decode('utf-8')
-                    urls = [line.strip() for line in content.splitlines() if line.strip()]
-                else:
-                    return jsonify({
-                        "error": "Unsupported file type. Use .xlsx, .xls, .txt, or .csv",
-                        "code": "UNSUPPORTED_FILE_TYPE"
-                    }), 400
-
-                if not urls:
-                    return jsonify({
-                        "error": "No URLs found in file",
-                        "code": "NO_URLS_IN_FILE"
-                    }), 400
-
-                if len(urls) > 50:  # Limit file uploads
-                    return jsonify({
-                        "error": "Maximum 50 URLs allowed per file",
-                        "code": "TOO_MANY_URLS"
-                    }), 400
-
-            except Exception as e:
-                return jsonify({
-                    "error": f"Error reading file: {str(e)}",
-                    "code": "FILE_READ_ERROR"
-                }), 400
-
-        results, errors = [], []
-
-        for raw_url in urls:
-            try:
-                if not raw_url or not str(raw_url).strip():
-                    raise ValueError("Empty URL in file")
-
-                clean_url = normalize_linkedin_url(str(raw_url))
-                lower_url = clean_url.lower()
-                is_company = bool(re.search(r"linkedin\.com/(company|school|showcase)/", lower_url))
-                is_user = bool(re.search(r"linkedin\.com/(in|pub)/", lower_url))
-
-                if not (is_company or is_user):
-                    errors.append({
-                        "url": raw_url,
-                        "error": "Must be a LinkedIn /company/ or /in/ URL",
-                        "code": "INVALID_LINKEDIN_URL"
-                    })
-                    continue
-
-                result = scrape_company(clean_url) if is_company else scrape_user(clean_url)
-                results.append(result)
-
-            except Exception as e:
-                errors.append({
-                    "url": raw_url,
-                    "error": str(e),
-                    "code": "SCRAPING_ERROR"
-                })
-
-        # Save results to file if we have any successful results
-        saved_file = None
-        if results:
-            saved_file = save_results_to_file(results, "file_upload")
-
-        response_data = {
-            "results": results,
-            "errors": errors,
-            "saved_to_file": saved_file is not None,
-            "file_path": saved_file,
-            "total_processed": len(results) + len(errors),
-            "successful": len(results),
-            "failed": len(errors),
-            "source_file": file.filename
-        }
-
-        return jsonify(response_data)
-
-    except Exception as e:
-        return jsonify({"error": f"Request processing failed: {str(e)}", "code": "REQUEST_ERROR"}), 500
-
-
-@app.route("/health", methods=["GET"])
-def health_check():
-    """Health check endpoint"""
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
-        "version": "1.0.0"
-    })
-
-
-@app.route("/status", methods=["GET"])
-def api_status():
-    """Get API status and configuration"""
-    try:
-        result_files_count = len([f for f in os.listdir(RESULTS_DIR) if f.endswith('.json')])
-    except:
-        result_files_count = 0
-
-    return jsonify({
-        "status": "running",
-        "api_key_configured": bool(LINKEDIN_API_KEY),
-        "version": "1.0.0",
-        "results_directory": RESULTS_DIR,
-        "saved_result_files": result_files_count,
-        "endpoints": [
-            "/",
-            "/health",
-            "/status",
-            "/version",
-            "/api/docs",
-            "/results",
-            "/scrape-profile",
-            "/scrape-bulk",
-            "/download-excel",
-            "/upload-urls",
-            "/cleanup"
-        ]
-    })
-
-
-@app.route("/api/docs", methods=["GET"])
-def api_docs():
-    """Return API documentation"""
-    try:
-        with open("API_DOCUMENTATION.md", "r", encoding="utf-8") as f:
-            docs = f.read()
-        response = app.response_class(
-            response=docs,
-            status=200,
-            mimetype="text/markdown"
-        )
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        return response
-    except FileNotFoundError:
-        return jsonify({"error": "Documentation not found"}), 404
-
-
-@app.route("/version", methods=["GET"])
-def api_version():
-    """Get API version information"""
-    return jsonify({
-        "version": "1.0.0",
-        "name": "LinkedIn Scraper API",
-        "description": "REST API for scraping LinkedIn profiles and companies with API fallback",
-        "endpoints": [
-            "GET /",
-            "GET /health",
-            "GET /status",
-            "GET /version",
-            "GET /api/docs",
-            "GET /results",
-            "POST /scrape-profile",
-            "POST /scrape-bulk",
-            "POST /download-excel",
-            "POST /upload-urls",
-            "POST /cleanup"
-        ]
-    })
-
-
-@app.route("/results", methods=["GET"])
-def list_results():
-    """List all saved result files"""
-    try:
-        files = []
-        for filename in os.listdir(RESULTS_DIR):
-            if filename.endswith('.json'):
-                filepath = os.path.join(RESULTS_DIR, filename)
-                file_info = {
-                    "filename": filename,
-                    "filepath": filepath,
-                    "size": os.path.getsize(filepath),
-                    "created": datetime.datetime.fromtimestamp(os.path.getctime(filepath)).isoformat(),
-                    "modified": datetime.datetime.fromtimestamp(os.path.getmtime(filepath)).isoformat()
-                }
-                files.append(file_info)
-
-        # Sort by creation time (newest first)
-        files.sort(key=lambda x: x['created'], reverse=True)
-
-        return jsonify({
-            "total_files": len(files),
-            "results_directory": RESULTS_DIR,
-            "files": files
-        })
-
-    except Exception as e:
-        return jsonify({"error": f"Failed to list results: {str(e)}", "code": "LIST_ERROR"}), 500
-
-
-@app.route("/cleanup", methods=["POST"])
-def cleanup_results():
-    """Clean up old result files"""
-    try:
-        body = request.get_json(silent=True) or {}
-        max_age_days = body.get("max_age_days", 7)  # Default 7 days
-
-        if not isinstance(max_age_days, int) or max_age_days < 1:
-            return jsonify({
-                "error": "max_age_days must be a positive integer",
-                "code": "INVALID_MAX_AGE"
-            }), 400
-
-        deleted_count = cleanup_old_files(max_age_days)
-
-        return jsonify({
-            "message": f"Cleaned up {deleted_count} old result files",
-            "max_age_days": max_age_days,
-            "results_directory": RESULTS_DIR
-        })
-
-    except Exception as e:
-        return jsonify({"error": f"Cleanup failed: {str(e)}", "code": "CLEANUP_ERROR"}), 500
+    return jsonify({"results": results, "errors": errors})
 
 
 if __name__ == "__main__":
-    print("LinkedIn Scraper API running at http://localhost:3000")
-    print("Employee Count: extracted from page text, dt/dd pairs, JSON blobs, JSON-LD")
-    print("Use responsibly — public data only.")
+    logging.info("LinkedIn Scraper API running at http://localhost:3000")
+    logging.info("Employee Count: Extracted from page text, dt/dd pairs, JSON blobs, JSON-LD")
+    logging.info("Use responsibly — public data only.")
 
     import sys
     if len(sys.argv) > 1 and "linkedin.com" in sys.argv[1]:
         url = sys.argv[1]
         try:
             result = scrape_company(url) if "/company/" in url else scrape_user(url)
+            print("\n=== SCRAPED DATA ===")
             for k, v in result.items():
-                print(f"  {k}: {str(v)[:120]}")
+                # Truncate long values for display
+                display_v = str(v)[:200] + "..." if len(str(v)) > 200 else str(v)
+                print(f"  {k}: {display_v}")
         except Exception as e:
             print(f"Error: {e}")
 
